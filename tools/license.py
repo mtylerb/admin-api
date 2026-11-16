@@ -47,7 +47,9 @@ class GrommunioLicense(GenericObject):
 def _defaultLicense():
     return GrommunioLicense(cert=None,
                             file=None,
-                            users=5,
+                            # Locally maintained AGPL build: no practical server-wide user cap.
+                            # Per-domain maxUser limits remain enforced independently.
+                            users=2147483647,
                             product="Community",
                             notBefore=datetime(1000, 1, 1, tzinfo=TZ),
                             notAfter=datetime(MAXYEAR, 12, 31, 23, 59, 59, tzinfo=TZ))
