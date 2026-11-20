@@ -6,19 +6,21 @@ from . import ServiceHub, ServiceUnavailableError
 
 from mattermostdriver import Driver
 from mattermostdriver.exceptions import InvalidOrMissingParameters, ResourceNotFound, ContentTooLarge, NoAccessTokenProvided
-from requests.exceptions import ConnectionError, HTTPError
+from requests.exceptions import ConnectionError, HTTPError, Timeout
 
 import hashlib
 import random
+import re
 import string
 import time
+import warnings
 
 import logging
 logger = logging.getLogger("chat")
 
 
 def handleGrochatExceptions(service, error):
-    if isinstance(error, ConnectionError):
+    if isinstance(error, (ConnectionError, Timeout)):
         return ServiceHub.SUSPENDED
     elif isinstance(error, (InvalidOrMissingParameters, ResourceNotFound, ContentTooLarge)):
         raise ValueError("grochat: invalid data")
@@ -26,7 +28,7 @@ def handleGrochatExceptions(service, error):
         return ServiceHub.UNAVAILABLE, "grommunio-chat returned an error: {}".format(error)
 
 
-@ServiceHub.register("chat", handleGrochatExceptions, maxreloads=3)
+@ServiceHub.register("chat", handleGrochatExceptions, maxreloads=None, reloadlocktime=30)
 class GrochatService:
     class _DriverWrap:
         def __init__(self, driver, obj=None):
@@ -46,11 +48,26 @@ class GrochatService:
     
     def __init__(self):
         from tools.config import Config
+        connection = Config["chat"]["connection"]
+        if connection.get("verify") is False:
+            self._silenceInsecureWarning(connection.get("url", Driver.default_options["url"]))
         try:
-            self.driver = self._DriverWrap(Driver(Config["chat"]["connection"]))
+            self.driver = self._DriverWrap(Driver(connection))
             self.driver.login()
         except Exception as err:
             raise ServiceUnavailableError("Failed to connect to grommunio-chat", err)
+
+    @staticmethod
+    def _silenceInsecureWarning(host):
+        """Suppress urllib3's per-request InsecureRequestWarning for the chat host.
+
+        Certificate verification was explicitly disabled in the configuration, so repeating the warning
+        on every API call only clutters CLI output and logs. Requests to other hosts are not affected.
+        """
+        from urllib3.exceptions import InsecureRequestWarning
+        logger.debug("grochat: certificate verification disabled for '%s'", host)
+        warnings.filterwarnings("ignore", "Unverified HTTPS request is being made to host '{}'".format(re.escape(host)),
+                                InsecureRequestWarning)
 
     @staticmethod
     def _addif(props, data, srcname, dstname):
@@ -180,7 +197,7 @@ class GrochatService:
             return None
         try:
             return self.driver.users.get_user(userID)
-        except HTTPError:
+        except ResourceNotFound:
             return None
 
     def domainToData(self, domain):

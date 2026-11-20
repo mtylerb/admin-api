@@ -103,7 +103,8 @@ def _dumpUser(cli, user, indent=0):
     cli.print(" "*indent+"ldapID: "+(escape_filter_chars(user.externID) if user.externID is not None else
                                      cli.col("(none)", attrs=["dark"])))
     cli.print(" "*indent+"chat: "+(user.chatID if user.chatID else cli.col("(none)", attrs=["dark"])) +
-              (" ("+cli.col("inactive", "red")+")" if user.chatID and not user.chat else ""))
+              (" ("+cli.col("unknown - chat unavailable", "yellow")+")" if user.chatID and user.chat is None else
+               " ("+cli.col("inactive", "red")+")" if user.chatID and not user.chat else ""))
     if user.chat:
         cli.print(" "*indent+"chatAdmin: "+(cli.col("yes", "yellow") if user.chatAdmin else "no"))
     cli.print(" "*indent+"aliases:"+(cli.col(" (none)", attrs=["dark"]) if len(user.aliases) == 0 else ""))
@@ -300,6 +301,8 @@ def cliUserCreate(args):
             domain = Domains.query.filter(Domains.domainname == args.username.split("@", 1)[1]).with_entities(Domains.ID).first()
             if domain is not None:
                 props.update(DBConf.getFile("grommunio-admin", "defaults-domain-"+str(domain.ID), True).get("user", {}))
+        if isinstance(props.get("chat"), str):
+            del props["chat"]  # Defaults are set through the API and must not link existing chat accounts
     data = _splitData(args.__dict__)
     props.update(data["attributes"])
     props["username"] = args.username

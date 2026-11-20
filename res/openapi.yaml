@@ -2,7 +2,7 @@ openapi: 3.0.0
 info:
   title: grommunio Admin API
   description: grommunio administration REST API
-  version: 1.21.0
+  version: 1.22.0
 servers:
   - url: '/api/v1'
     description: Default deployment path
@@ -99,6 +99,24 @@ paths:
           $ref: '#/components/responses/ServerError'
         '503':
           $ref: '#/components/responses/DatabaseError'
+
+  /logout:
+    post:
+      summary: Logout user
+      description: Revoke the session token and clear the session cookie
+      operationId: postLogout
+      tags:
+        - Misc
+      responses:
+        '200':
+          description: Logged out
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
 
   /login/oidc:
     get:
@@ -245,6 +263,8 @@ paths:
   /passwd/{username}:
     put:
       summary: Change user password
+      description: Resetting any user requires the ResetPasswd permission. Domain and organization admins can only reset
+        users of their domains, other users are reported as not found. Use `/passwd` to change the own password.
       operationId: resetPasswd
       tags:
         - Misc
@@ -269,6 +289,8 @@ paths:
           description: Password updated
         '400':
           $ref: '#/components/responses/InvalidRequest'
+        '403':
+          description: Insufficient permissions
         '404':
           $ref: "#/components/responses/NotFound"
         '500':
@@ -279,6 +301,8 @@ paths:
   /users:
     get:
       summary: Get list of usernames
+      description: Lists the users available for `/passwd/{username}`. Domain and organization admins only get the users
+        of their domains.
       operationId: getUsernames
       tags:
         - Misc
@@ -302,6 +326,8 @@ paths:
                           type: string
         '400':
           $ref: '#/components/responses/InvalidRequest'
+        '403':
+          description: Insufficient permissions
         '500':
           $ref: '#/components/responses/ServerError'
         '503':
@@ -1157,6 +1183,8 @@ paths:
   /system/users:
     get:
       summary: Get list of all users
+      description: Requires read-only system admin permissions. Organization admins can only list the users of their
+        organization and have to specify it with `orgID`.
       operationId: getAllUsers
       tags:
         - System Admin/Domains
@@ -1171,6 +1199,12 @@ paths:
         - $ref: '#/components/parameters/filterProp'
         - $ref: '#/components/parameters/matchProps'
         - $ref: '#/components/parameters/propnames'
+        - name: orgID
+          description: Filter by organization ID
+          in: query
+          explode: false
+          schema:
+            $ref: '#/components/schemas/intList'
         - name: mlist
           description: Hide MList users
           in: query
@@ -1192,6 +1226,8 @@ paths:
                       $ref: '#/components/schemas/user'
         '400':
           $ref: '#/components/responses/InvalidRequest'
+        '403':
+          description: Insufficient permissions
         '500':
           $ref: '#/components/responses/ServerError'
         '503':
@@ -2542,6 +2578,9 @@ paths:
                 $ref: '#/components/schemas/user'
         '400':
           $ref: '#/components/responses/InvalidRequest'
+        '403':
+          description: Insufficient permissions, or `username`, `ldapID` or `altnames` of a user holding permissions the
+            caller does not have would be changed
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
@@ -3155,6 +3194,8 @@ paths:
           description: User password updated
         '400':
           $ref: '#/components/responses/InvalidRequest'
+        '403':
+          description: Insufficient permissions, or the user holds permissions the caller does not have
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
@@ -3960,6 +4001,8 @@ paths:
                 $ref: '#/components/schemas/user'
         '400':
           $ref: '#/components/responses/InvalidRequest'
+        '403':
+          description: Insufficient permissions, or `force` would link a user holding permissions the caller does not have
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
@@ -5505,7 +5548,8 @@ components:
           nullable: true
         chat:
           type: boolean
-          description: Whether chat is enabled for this domain
+          nullable: true
+          description: Whether chat is enabled for this domain (null if grommunio-chat is not reachable; ignored on update)
     domain:
       allOf:
         - $ref: '#/components/schemas/domainCommon'
@@ -5742,10 +5786,12 @@ components:
           nullable: true
         chat:
           type: boolean
-          description: Whether chat is enabled for this user
+          nullable: true
+          description: Whether chat is enabled for this user (null if grommunio-chat is not reachable; ignored on update)
         chatAdmin:
           type: boolean
-          description: Whether this user has grommunio-chat admin permissions
+          nullable: true
+          description: Whether this user has grommunio-chat admin permissions (null if grommunio-chat is not reachable; ignored on update)
         lang:
           type: string
           description: User language
@@ -5828,10 +5874,13 @@ components:
           nullable: true
         chat:
           type: boolean
-          description: Whether chat is enabled for this user
+          nullable: true
+          description: Whether chat is enabled for this user (null if grommunio-chat is not reachable; ignored on update)
         chatAdmin:
           type: boolean
-          description: Whether this user has grommunio-chat admin permissions
+          nullable: true
+          description: Whether this user has grommunio-chat admin permissions (null if grommunio-chat is not reachable; ignored on update).
+            Only system admins can set this, it is ignored otherwise.
         lang:
           type: string
           description: User language
@@ -5906,10 +5955,13 @@ components:
           nullable: true
         chat:
           type: boolean
-          description: Whether chat is enabled for this user
+          nullable: true
+          description: Whether chat is enabled for this user (null if grommunio-chat is not reachable; ignored on update)
         chatAdmin:
           type: boolean
-          description: Whether this user has grommunio-chat admin permissions
+          nullable: true
+          description: Whether this user has grommunio-chat admin permissions (null if grommunio-chat is not reachable; ignored on update).
+            Only system admins can set this, it is ignored otherwise.
         lang:
           type: string
           description: User language

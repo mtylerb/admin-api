@@ -17,10 +17,14 @@ Possible parameters:
 - `level` (`int` or `string`, default: `WARNING`): Default log level (possible values are `DEBUG`, `INFO`, `WARNING`, `ERROR` and `CRITICAL`)
 - `loggers` (`object`, default: `{}`): Associative array containing options for specific loggers
 
+### Audit ###
+Audit logging is configured by the `audit` object. Possible parameters:
+- `enabled` (`boolean`, default: `false`): Log every change made through the API or CLI, all logins and denied requests. Lines go to syslog (facility `authpriv`, identifier `grommunio-admin`) and start with `admin-audit:`, e.g. `journalctl -t grommunio-admin`. Passwords and other secrets are never logged.
+
 ### Chat ###
 Parameters necessary to make the grommunio-chat management work can be configured in the `chat` object.  
 Possible parameters:
-- `connection` (`object`): Parameters for connecting to the grommunio-chat API. See [Mattermost Driver](https://pypi.org/project/mattermostdriver/) for possible parameters.
+- `connection` (`object`): Parameters for connecting to the grommunio-chat API. See [Mattermost Driver](https://pypi.org/project/mattermostdriver/) for possible parameters. `request_timeout` defaults to `10` seconds.
 
 ### Database ###
 Parameters necessary for database connection can be configured by the `DB` object.  
@@ -108,3 +112,5 @@ Further parameters can be set in the `options` object:
 - `antispamUrl` (`string`, default: `http://localhost:11334`): URL of the grommunio-antispam backend
 - `antispamEndpoints` (`list of strings`, default: `["stat", "graph", "errors"]`): List of allowed endpoints to proxy to grommunio-antispam
 - `vhosts` (`object`, default: `{}`): Name -> URL mapping of nginx VHost status endpoints
+- `ldapTlsVerify` (`string`, default: `auto`): Verify LDAP server certificates (`ldaps://` and STARTTLS). `auto` follows `TLS_REQCERT` in `/etc/openldap/ldap.conf` (or `/etc/ldap/ldap.conf`) the same way gromox does, i.e. verify unless set to `never` or `allow`. `always` and `never` override it.
+- `ldapCACert` (`string`): CA file used to verify LDAP server certificates. Default is `TLS_CACERT`/`TLS_CACERTDIR` from ldap.conf, else the system trust store.

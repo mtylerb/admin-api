@@ -1,3 +1,46 @@
+admin-api 1.22 (development)
+============================
+
+* The API sets the session cookie (HttpOnly, SameSite=Strict), scripts on
+  other services of the host can no longer read the admin token
+* New ``POST /logout`` endpoint, revokes the token (uses redis)
+* Organization admins no longer pass read-only system admin checks and lose
+  access to system-wide data (``/system`` endpoints such as roles, logs,
+  dbconf or the LDAP configuration, tasks of other organizations).
+  ``GET /system/users`` remains available to them, limited to the users of
+  the administrated organization given as ``orgID``.
+* Security: only system admins can grant or revoke grommunio-chat admin
+  permissions (``chatAdmin``). As grommunio-chat is shared by all domains, the
+  attribute is ignored for domain and organization admins.
+* Security: the API and the creation defaults no longer accept the ID of an
+  existing chat account as ``chat`` value, linking chat accounts is left to
+  the CLI (``user create`` / ``user modify`` with ``--chat <ID>``)
+* Fix live status (``/system/vhostStatus``) failing with a 502 error
+* Domain and organization admins can only reset passwords
+  (``PUT /passwd/<username>``) and list users (``GET /users``) of their own
+  domains. The ``ResetPasswd`` permission is no longer implied by
+  ``DomainAdmin`` and ``OrgAdmin`` and has to be granted explicitly to reset
+  users system-wide.
+* ``PUT /passwd/<username>`` no longer resets the password of the caller
+  (use ``PUT /passwd`` with the old password instead) and rejects a missing
+  or non-string ``new`` with 400
+* Security: the address an e-mail forward applies to can no longer be set
+  through the API, it always is the address of the user the forward belongs
+  to. Forwards require a user with a mail address (no contacts), and existing
+  users cannot be renamed to a name without domain part.
+* Renaming a user keeps its e-mail forward. Purging a domain removes the
+  forwards of its addresses, and a forward left behind on an address is
+  removed when the address is given to a user (created or renamed) or added
+  as an alias.
+* Security: admins can no longer take over users who hold permissions they do
+  not have themselves, e.g. a system admin located in their domain. Setting
+  the password, changing ``username``, ``ldapID`` or ``altnames`` and a forced
+  LDAP import of such a user are rejected with 403. Users without roles and
+  admins with the same or fewer permissions can be managed as before, holders
+  of system-wide permissions (``SystemAdmin``, ``SystemAdminRO``, wildcard
+  parameters) only by a system admin.
+
+
 admin-api 1.21 (development)
 ============================
 

@@ -171,7 +171,8 @@ class Users(DataModel, DB.Base, NotifyTable):
     fetchmail = OptionalNC(75, [],
                            relationship("Fetchmail", cascade="all, delete-orphan", single_parent=True,
                                         order_by="Fetchmail.active.desc()", back_populates="user"))
-    forward = relationship("Forwards", uselist=False, cascade="all, delete-orphan", back_populates="user")
+    forward = relationship("Forwards", uselist=False, cascade="all, delete-orphan", back_populates="user",
+                           passive_updates=False)
     homeserver = OptionalNC(104, None,
                             relationship("Servers", foreign_keys=homeserverID, primaryjoin="Users.homeserverID == Servers.ID"))
     mlist = relationship("MLists", back_populates="user", uselist=False)
@@ -310,7 +311,8 @@ class Users(DataModel, DB.Base, NotifyTable):
             if Users.count(Users.domainID == domain.ID) >= domain.maxUser:
                 raise ValueError("Maximum number of domain users reached")
 
-        if "username" in patches and patches["username"] != self.username:
+        renamed = "username" in patches and patches["username"] != self.username
+        if renamed:
             username = patches.pop("username")
             if "@" in username:
                 uname, dname = username.split("@", 1)
@@ -319,8 +321,10 @@ class Users(DataModel, DB.Base, NotifyTable):
                 self.username = uname+"@"+domain.domainname
             elif not isContact:
                 self.username = username+"@"+domain.domainname
-            else:
+            elif self.username is None:
                 self.username = username
+            else:
+                raise ValueError("'{}' is not a valid e-mail address".format(username))
             if not isContact and not formats.email.match(self.username):
                 raise ValueError("'{}' is not a valid e-mail address".format(self.username))
 
@@ -338,6 +342,10 @@ class Users(DataModel, DB.Base, NotifyTable):
             patches["aliases"] = aliases
 
         DataModel.fromdict(self, patches, *args, **kwargs)
+        # The MTA looks up forwards by username, which therefore must be the address of a real user
+        if (renamed or "forward" in patches or "status" in patches) and self.forward is not None and \
+           (self.status == Users.CONTACT or self.username.find("@") < 1):
+            raise ValueError("E-mail forwards require a user with a mail address")
         displaytype = self.properties.get("displaytypeex", 0)
         if displaytype in (0, 1, 7, 8):
             self._deprecated_addressType, self._deprecated_subType = self._decodeDisplayType(displaytype)
@@ -620,23 +628,31 @@ class Users(DataModel, DB.Base, NotifyTable):
 
     @property
     def chat(self):
+        """Whether the chat user is active, or None if grommunio-chat is not reachable."""
         if not self.chatID:
             return False
         if self._chatUser is None:
+            chatUser = Service.Unknown
             with Service("chat", errors=Service.SUPPRESS_INOP) as chat:
-                self._chatUser = chat.getUser(self.chatID)
-        return self.domain.chat and self._chatUser["delete_at"] == 0 if self._chatUser else False
+                chatUser = chat.getUser(self.chatID)
+            if chatUser is Service.Unknown:
+                return None
+            self._chatUser = chatUser
+        if not self._chatUser:
+            return False
+        domainChat = self.domain.chat
+        return None if domainChat is None else domainChat and self._chatUser["delete_at"] == 0
 
     @chat.setter
     def chat(self, value):
-        if value == self.chat:
+        if value is None or value == self.chat:
             return
         if not DB.minVersion(78):
             raise ValueError("Cannot activate chat - please upgrade database schema to at least 78")
         if value and self.addressStatus:
             raise ValueError("Cannot activate chat for locked user")
         err_prefix = "Could not enable chat for user '{}': ".format(self.username)
-        if not self.domain.chat:
+        if self.domain.chat is False:
             logger.warning(err_prefix+"chat is not enabled for domain")
             return
         with Service("chat") as chat:
@@ -667,7 +683,7 @@ class Users(DataModel, DB.Base, NotifyTable):
 
     @chatAdmin.setter
     def chatAdmin(self, value):
-        if not self.chat or self.chatAdmin == bool(value):
+        if value is None or not self.chat or self.chatAdmin == bool(value):
             return
         if value:
             tmpRoles = " ".join(self._chatUser["roles"].split(" ")+["system_admin"])
@@ -1166,13 +1182,14 @@ class Forwards(DataModel, DB.Base):
 
     _dictmapping_ = ((Text("forwardType", flags="patch"),
                       Text("destination", flags="patch")),
-                     (Id(), Text("username", flags="patch")))
+                     (Id(), Text("username")))
 
     CC = 0
     REDIRECT = 1
 
     def __init__(self, props, user, *args, **kwargs):
         self.user = user
+        self.username = user.username
         self.fromdict(props)
 
     @validates("destination")
@@ -1201,3 +1218,24 @@ else:
 def _User_expire(target, *args, **kwargs):
     if target is not None:
         target._propcache = None
+
+
+def _dropStaleForward(connection, address):
+    """Delete the forward a previous holder of the address left behind."""
+    forwards, users = Forwards.__table__, Users.__table__
+    if connection.execute(forwards.select().where(forwards.c.username == address)).first() is not None and \
+       connection.execute(users.select().where(users.c.username == address)).first() is None:
+        connection.execute(forwards.delete().where(forwards.c.username == address))
+
+
+# Done at flush time, so the forward is only gone if the address really is taken
+@event.listens_for(Users, "before_insert")
+@event.listens_for(Users, "before_update")
+def _User_newUsername(mapper, connection, target):
+    if inspect(target).attrs.username.history.has_changes():
+        _dropStaleForward(connection, target.username)
+
+
+@event.listens_for(Aliases, "before_insert")
+def _Aliases_insert(mapper, connection, target):
+    _dropStaleForward(connection, target.aliasname)

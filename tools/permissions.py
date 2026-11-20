@@ -121,6 +121,28 @@ class Permissions:
         """
         return self.has(permission)
 
+    def covers(self, other):
+        """Check if the permissions of another permissions object are represented.
+
+        Used to keep admins from taking over accounts that hold more permissions than they do.
+        As wildcard parameters match any parameter, system-wide permissions (SystemAdmin, SystemAdminRO and permissions
+        with parameter '*') are only covered by SystemAdmin.
+
+        Parameters
+        ----------
+        other : Permissions
+            Permissions to check
+
+        Returns
+        -------
+        bool
+            True if every permission of `other` is represented, False otherwise
+        """
+        if SystemAdminPermission() in self:
+            return True
+        return all(not isinstance(perm, (SystemAdminPermission, SystemAdminROPermission)) and perm.params != "*" and
+                   perm in self for perm in other)
+
     def __iter__(self):
         """Return permission iterator
 
@@ -207,6 +229,28 @@ class Permissions:
             Union of capabilities from all permissions
         """
         return set.union(*(permission.capabilities() for permission in self.permissions))
+
+    def resetPasswdDomains(self):
+        """Get the domains in which the password of users may be reset.
+
+        Domain and organization admins are limited to the domains they administrate.
+
+        Returns
+        -------
+        set
+            IDs of the permitted domains, or None if not restricted
+        """
+        if ResetPasswdPermission() in self:
+            return None
+        domainIDs = {perm.domainID for perm in self.permissions if isinstance(perm, DomainAdminPermission)}
+        orgIDs = {perm.orgID for perm in self.permissions if isinstance(perm, OrgAdminPermission)}
+        if "*" in domainIDs or "*" in orgIDs:
+            return None
+        if orgIDs:
+            from orm.domains import Domains
+            domains = Domains.query.filter(Domains.orgID.in_(tuple(orgIDs))).with_entities(Domains.ID).all()
+            domainIDs.update(d.ID for d in domains)
+        return domainIDs
 
 
 class PermissionBase:
@@ -353,7 +397,7 @@ class SystemAdminPermission:
 class ResetPasswdPermission(PermissionBase):
     """Permission class representing the permission to reset any users's password.
 
-    Currently only acts as system-wide permission. Domain or organization granularity may be added in the future.
+    Acts as system-wide permission and is not implied by domain or organization admin permissions.
     """
     @classmethod
     def capabilities(cls):
@@ -437,7 +481,7 @@ class DomainAdminROPermission(PermissionBase):
 
 
 @Permissions.register("DomainAdmin")
-class DomainAdminPermission(DomainAdminROPermission, ResetPasswdPermission):
+class DomainAdminPermission(DomainAdminROPermission):
     """Permission class representing admin permissions for a domain.
 
     Can represent permission for a specific domain, or domains in general (when parameter is '*').
@@ -522,7 +566,7 @@ class SystemAdminROPermission(DomainAdminROPermission):
 
 
 @Permissions.register("OrgAdmin")
-class OrgAdminPermission(ResetPasswdPermission):
+class OrgAdminPermission(PermissionBase):
     """Permission class representing admin permissions for an organization.
 
     An organization admin automatically has DomainAdminPermission for each domain belonging to an organization.
@@ -563,8 +607,8 @@ class OrgAdminPermission(ResetPasswdPermission):
         """
         if isinstance(permission, OrgAdminPermission):
             return self._permits(permission)
-        # `isinstance()` does not compare the inheritance of DAP and DA-RO-P properly
-        if isinstance(permission, DomainAdminPermission) or isinstance(permission, DomainAdminROPermission):
+        # Exact types only, SystemAdminRO is derived from DomainAdminRO but not implied by any domain permission
+        if type(permission) in (DomainAdminPermission, DomainAdminROPermission):
             if permission.domainID == "*" or self.__org == "*":
                 return True
             from orm.domains import Domains

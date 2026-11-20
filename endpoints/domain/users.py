@@ -5,13 +5,13 @@
 import api
 
 from api.core import API, secure
-from api.security import checkPermissions
+from api.security import checkPermissions, checkTargetUser
 from base64 import b64decode
 from datetime import datetime
 from flask import request, jsonify
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
-from .. import defaultObjectHandler, userQuery, defaultListQuery
+from .. import defaultDetailQuery, defaultPatch, userQuery, defaultListQuery
 
 from services import Service
 
@@ -32,17 +32,41 @@ import time
 from orm import DB
 
 
+def _resetDomains():
+    """Check that the current user may reset passwords and get the permitted domains.
+
+    Returns
+    -------
+    set
+        IDs of the permitted domains, or None if not restricted
+    """
+    permissions = request.auth["user"].permissions()
+    if ResetPasswdPermission() in permissions:
+        checkPermissions(ResetPasswdPermission())
+    else:
+        checkPermissions(DomainAdminPermission("*"))  # Any domain or organization admin
+    return permissions.resetPasswdDomains()
+
+
 @API.route(api.BaseRoute+"/passwd/<username>", methods=["PUT"])
 @secure(requireAuth=True, authLevel="user")
 def resetPasswd(username):
-    checkPermissions(ResetPasswdPermission())
+    domainIDs = _resetDomains()
     from orm.users import Users
-    user = Users.query.filter(Users.username == username, Users.maildir != "").first()
+    filters = (Users.username == username, Users.maildir != "")
+    if domainIDs is not None:
+        filters += (Users.domainID.in_(domainIDs),)
+    user = Users.query.filter(*filters).first()
     if not user:
         return jsonify(message="User not found."), 404
+    if user.ID == request.auth["user"].ID:
+        return jsonify(message="Cannot reset own password, use '/passwd' endpoint instead"), 400
+    checkTargetUser(user)
     if user.externID:
         return jsonify(message="Cannot modify LDAP imported user"), 400
-    data = request.get_json()
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not isinstance(data.get("new"), str):
+        return jsonify(message="Incomplete data"), 400
     user.password = data["new"]
     DB.session.commit()
     return jsonify(message="Password reset successfully.")
@@ -51,9 +75,12 @@ def resetPasswd(username):
 @API.route(api.BaseRoute+"/users", methods=["GET"])
 @secure(requireAuth=True, authLevel="user")
 def usernames():
-    checkPermissions(ResetPasswdPermission())
+    domainIDs = _resetDomains()
     from orm.users import Users
-    users = defaultListQuery(Users, (Users.ID != 0, Users.status == 0, Users.maildir != ""), result="list")
+    filters = (Users.ID != 0, Users.status == 0, Users.maildir != "")
+    if domainIDs is not None:
+        filters += (Users.domainID.in_(domainIDs),)
+    users = defaultListQuery(Users, filters, result="list")
     return jsonify(data=[{"username": user.username} for user in users])
 
 
@@ -62,6 +89,11 @@ def usernames():
 def getUsers(domainID):
     checkPermissions(DomainAdminROPermission(domainID))
     return userQuery(domainID)
+
+
+def _linksChat(data):
+    """Check whether `chat` is the ID of an existing chat account to link instead of a flag, which is left to the CLI."""
+    return isinstance(data, dict) and isinstance(data.get("chat"), str)
 
 
 @API.route(api.BaseRoute+"/domains/<int:domainID>/users", methods=["POST"])
@@ -73,11 +105,31 @@ def createUser(domainID):
     data["domainID"] = domainID
     if SystemAdminPermission() not in request.auth["user"].permissions():
         data.pop("homeserver", None)
+        data.pop("chatAdmin", None)  # grommunio-chat is shared by all domains
+    if _linksChat(data):
+        return jsonify(message="Attribute 'chat' must be a boolean"), 400
     isContact = data.get("status") == Users.CONTACT
     result, code = Users.mkContact(data) if isContact else Users.create(data)
     if code != 201:
         return jsonify(message=result), code
     return jsonify(result.fulldesc()), 201
+
+
+def _loginChanged(user, data):
+    """Check if a patch changes the names or the LDAP object a user logs in with."""
+    if not isinstance(data, dict):
+        return False
+    # Clients resend complete objects, so compare the values
+    if "username" in data and data["username"] != user.username:
+        return True
+    if "ldapID" in data and data["ldapID"] != user.ldapID:
+        return True
+    if "altnames" in data:
+        try:
+            return {altname["altname"] for altname in data["altnames"]} != {altname.altname for altname in user.altnames}
+        except (KeyError, TypeError):
+            return True
+    return False
 
 
 @API.route(api.BaseRoute+"/domains/<int:domainID>/users/<int:userID>", methods=["GET", "PATCH"])
@@ -87,8 +139,17 @@ def userObjectEndpoint(domainID, userID):
     if request.method == "PATCH" and SystemAdminPermission() not in request.auth["user"].permissions():
         data = request.get_json(silent=True) or {}
         data.pop("homeserver", None)
+        data.pop("chatAdmin", None)  # grommunio-chat is shared by all domains
+    if request.method == "PATCH" and _linksChat(request.get_json(silent=True)):
+        return jsonify(message="Attribute 'chat' must be a boolean"), 400
     from orm.users import Users
-    return defaultObjectHandler(Users, userID, "User", filters=(Users.domainID == domainID,))
+    filters = (Users.domainID == domainID,)
+    if request.method == "GET":
+        return defaultDetailQuery(Users, userID, "User", filters)
+    user = Users.query.filter(Users.ID == userID, *filters).first()
+    if user is not None and _loginChanged(user, request.get_json(silent=True)):
+        checkTargetUser(user)
+    return defaultPatch(Users, userID, "User", user, filters)
 
 
 @API.route(api.BaseRoute+"/domains/<int:domainID>/users/<int:userID>", methods=["DELETE"])
@@ -128,6 +189,7 @@ def setUserPassword(domainID, userID):
     user = Users.query.filter(Users.ID == userID, Users.domainID == domainID).first()
     if user is None:
         return jsonify(message="User not found"), 404
+    checkTargetUser(user)
     if user.externID is not None:
         return jsonify(message="Cannot modify LDAP imported user"), 400
     data = request.get_json(silent=True)

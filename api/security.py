@@ -159,7 +159,47 @@ def checkToken(token):
         return False, "Invalid token signature"
     except Exception:
         return False, "invalid token"
+    if tokenRevoked(token):
+        return False, "Token has been revoked"
     return True, claims
+
+
+def _revokedKey(token):
+    return "grommunio-admin:revoked:" + hashlib.sha256(token.encode("ascii")).hexdigest()
+
+
+def tokenRevoked(token):
+    """Check if token was revoked by a logout. Fails open if redis is unavailable."""
+    revoked = False
+    with Service("redis", errors=Service.SUPPRESS_ALL) as redis:
+        revoked = bool(redis.exists(_revokedKey(token)))
+    return revoked
+
+
+def revokeToken(token):
+    """Revoke token until it expires."""
+    try:
+        claims = jwt.decode(token, jwtPubkey, algorithms=["RS256"])
+    except Exception:
+        return
+    ttl = int(claims.get("exp", 0) - time.time())
+    if ttl > 0:
+        with Service("redis", errors=Service.SUPPRESS_ALL) as redis:
+            redis.setex(_revokedKey(token), ttl, 1)
+
+
+def setAuthCookie(response, token):
+    """Set the session cookie (not readable by scripts)."""
+    expires = jwt.decode(token, options={"verify_signature": False}).get("exp")
+    response.set_cookie("grommunioAuthJwt", token, expires=expires, path="/", secure=request.is_secure, httponly=True,
+                        samesite="Strict")
+    return response
+
+
+def clearAuthCookie(response):
+    response.delete_cookie("grommunioAuthJwt", path="/", secure=request.is_secure, httponly=True,
+                           samesite="Strict")
+    return response
 
 
 def userLoginAllowed(user):
@@ -252,3 +292,28 @@ def checkPermissions(*requested):
     permissions = user.permissions()
     if not all(permission in permissions for permission in requested):
         raise InsufficientPermissions()
+
+
+def checkTargetUser(user):
+    """Check if current user may change the login names or credentials of a user.
+
+    Admins must not take over accounts that hold permissions they do not have themselves.
+
+    Parameters
+    ----------
+    user : orm.users.Users
+        User to be changed
+
+    Raises
+    ------
+    InsufficientPermissions
+        The user holds permissions the current user lacks
+
+    Returns
+    -------
+    None.
+    """
+    from .errors import InsufficientPermissions
+    current = request.auth["user"]
+    if user.ID != current.ID and not current.permissions().covers(user.permissions()):
+        raise InsufficientPermissions("User holds permissions you do not have")

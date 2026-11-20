@@ -51,6 +51,7 @@ def _getc(cli, prompt="", default="", choices=(), getter=_getv):
         res = getter(cli, prompt, default)
         if res in choices:
             return res
+        res = None
 
 
 def _getl(cli, prompt="", defaults=[]):
@@ -292,7 +293,8 @@ def _downsyncOrg(args, orgID, ldap, resCount):
         resCount.success += result
         resCount.failed += not result
 
-    if args.complete:
+    # Can't use dot-notation because 'import' is a keyword
+    if getattr(args, "import") or args.complete:
         from services import Service
         with Service("ldap", orgID) as ldap:
             candidates = [candidate for candidate in ldap.searchUsers() if candidate.ID not in synced]
@@ -476,7 +478,7 @@ def _applyTemplate(index, conf):
         conf["groups"]["groupaddr"] = "mailPrimaryAddress"
         conf["groups"]["groupfilter"] = "(objectClass=posixgroup)"
         conf["groups"]["groupname"] = "cn"
-    elif index == 3: # Univention
+    elif index == 3: # Univention (OpenLDAP, port 7389)
         conf["objectID"] = "entryUUID"
         conf["users"]["username"] = "mailPrimaryAddress"
         conf["users"]["displayName"] = "displayname"
@@ -499,6 +501,18 @@ def _applyTemplate(index, conf):
         conf["groups"]["groupMemberAttr"] = "memberOf"
         conf["groups"]["groupaddr"] = "mail"
         conf["groups"]["groupfilter"] = "(objectClass=posixgroup)"
+        conf["groups"]["groupname"] = "cn"
+    elif index == 5: # Univention Samba4 AD DC (port 389)
+        conf["objectID"] = "objectGUID"
+        conf["users"]["username"] = "mail"
+        conf["users"]["displayName"] = "displayName"
+        conf["users"]["searchAttributes"] = ["mail", "givenName", "cn", "sn", "name", "displayName"]
+        conf["users"]["filter"] = "(&(objectClass=user)(!(objectClass=computer)))"
+        conf["users"]["contactFilter"] = "(objectClass=contact)"
+        conf["users"]["aliases"] = ""  # the S4 connector does not sync alternative addresses
+        conf["groups"]["groupMemberAttr"] = "memberOf"
+        conf["groups"]["groupaddr"] = "mail"
+        conf["groups"]["groupfilter"] = "(objectClass=group)"
         conf["groups"]["groupname"] = "cn"
     return
 
@@ -526,7 +540,8 @@ def _getConf(cli, old, oldAuthmgr, organization):
                  1: ['common', 'ActiveDirectory'],
                  2: ['common', 'OpenLDAP'],
                  3: ['common', 'Univention'],
-                 4: ['common', '389ds']
+                 4: ['common', '389ds'],
+                 5: ['common', 'UniventionSamba'],
                }
     tmpl2res = {i:'' if res2tmpl[i] == [] else res2tmpl[i][1] for i in res2tmpl}
     tmpl2res = dict(zip(tmpl2res.values(), tmpl2res.keys()))
@@ -555,8 +570,9 @@ def _getConf(cli, old, oldAuthmgr, organization):
             oldchoice = tmpl2res[oldtempl.pop()]
         except (ValueError, IndexError):
             oldchoice = 0
-    res = _getc(cli, "Choose a template:\n 0: No template\n 1: ActiveDirectory\n 2: OpenLDAP\n 3: Univention\n 4: 389ds\n",
-                oldchoice, range(4), _geti)
+    res = _getc(cli, "Choose a template:\n 0: No template\n 1: ActiveDirectory\n 2: OpenLDAP\n"
+                " 3: Univention (OpenLDAP, port 7389)\n 4: 389ds\n 5: Univention (Samba AD, port 389)\n",
+                oldchoice, range(len(res2tmpl)), _geti)
     conf["users"]["templates"] = res2tmpl[res]
     if res != 0 and cli.confirm("Apply default template parameters? [y/N]: ") == Cli.SUCCESS:
         _applyTemplate(res, old)
@@ -594,7 +610,7 @@ def _getConf(cli, old, oldAuthmgr, organization):
         oldauthbackend = oldAuthmgr['authBackendSelection']
         confAuthmgr = {"authBackendSelection": "externid"}
         res = _getc(cli, "Choose an authmgr global system authentication backend:\n 0: externid (automatic)\n 1: always_mysql\n 2: always_ldap\n",
-                    1 if "always_mysql" in oldauthbackend else 2 if "always_ldap" in oldauthbackend else 0, range(2), _geti)
+                    1 if "always_mysql" in oldauthbackend else 2 if "always_ldap" in oldauthbackend else 0, range(3), _geti)
         confAuthmgr["authBackendSelection"] = "always_mysql" if res == 1 else ("always_ldap" if res == 2 else "externid")
 
     return conf, confAuthmgr
@@ -748,11 +764,12 @@ def _cliLdapParserSetup(subp: ArgumentParser):
     configure.add_argument("-d", "--delete", action="store_true", help="Do not configure anything, but delete configuration")
     configure.add_argument("-o", "--organization", metavar="ORGSPEC", help="Use organization specific LDAP connection")\
         .completer = _cliOrgspecCompleter
-    downsync = sub.add_parser("downsync", help="Import or update users from ldap")
+    downsync = sub.add_parser("downsync", help="Import and/or update users from ldap")
     downsync.set_defaults(_handle=cliLdapDownsync)
     downsync.add_argument("user", nargs="*", help="LDAP ID or user search query string. If omitted, all users linked to an "
                                                   "LDAP object are updated.")
-    downsync.add_argument("-c", "--complete", action="store_true", help="Import/update all users in the ldap tree")
+    downsync.add_argument("-i", "--import", action="store_true", help="Import new users from LDAP")
+    downsync.add_argument("-c", "--complete", action="store_true", help="(Deprecated due to previously incorrect behavior) Import new users from LDAP")
     downsync.add_argument("-f", "--force", action="store_true", help="Force synchronization of unassociated users")
     downsync.add_argument("-l", "--lang", help="Default language for imported users")
     downsync.add_argument("-o", "--organization", metavar="ORGSPEC", action="append",

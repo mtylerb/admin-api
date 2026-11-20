@@ -88,6 +88,7 @@ def _defaultConfig():
             "serverPolicy": "round-robin",
             "updateLogPath": "/var/log/grommunio-update.log",
             "updateSkriptPath": "/usr/sbin/grommunio-update",
+            "ldapTlsVerify": "auto",
             },
         "security": {
             "jwtPrivateKeyFile": "/var/lib/grommunio-admin-api/auth-private.pem",
@@ -105,7 +106,9 @@ def _defaultConfig():
             "policyHosts": ["127.0.0.1", "localhost", "::1", "::ffff:127.0.0.1"]
             },
         "chat": {
-            "connection": {},
+            "connection": {
+                "request_timeout": 10,
+                },
             },
         "oidc": {
             "enabled": False,
@@ -114,6 +117,9 @@ def _defaultConfig():
             },
         "tasq": {
             "stackTraceDepth": 7,
+            },
+        "audit": {
+            "enabled": False,
             },
         }
 

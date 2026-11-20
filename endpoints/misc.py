@@ -8,13 +8,14 @@ import api
 import idna
 
 from api.core import API, secure
-from api.security import loginUser, refreshToken, getSecurityContext, mkCSRF
+from api.security import loginUser, refreshToken, getSecurityContext, mkCSRF, setAuthCookie, clearAuthCookie, \
+    revokeToken, checkToken
 
 from . import oidc
 
 from orm import DB
 from services import Service
-from tools import formats
+from tools import audit, formats
 from tools.tasq import TasQServer
 from tools.permissions import OrgAdminPermission
 
@@ -43,13 +44,27 @@ def login():
         refreshed = refreshToken()
         if refreshed is None:
             return jsonify(message="Incomplete login form"), 400
-        return jsonify(grommunioAuthJwt=refreshed, csrf=mkCSRF(refreshed))
+        return setAuthCookie(jsonify(grommunioAuthJwt=refreshed, csrf=mkCSRF(refreshed)), refreshed)
     success, val = loginUser(request.form["user"], request.form["pass"])
     if not success:
         API.logger.warning("Failed login attempt for user '{}' from '{}': {}"
                            .format(request.form["user"], request.remote_addr, val))
+        audit.login(request, request.form["user"], "password", val)
         return jsonify(message="Login failed", error=val), 401
-    return jsonify(grommunioAuthJwt=val, csrf=mkCSRF(val))
+    audit.login(request, request.form["user"], "password")
+    return setAuthCookie(jsonify(grommunioAuthJwt=val, csrf=mkCSRF(val)), val)
+
+
+@API.route(api.BaseRoute+"/logout", methods=["POST"])
+@secure(requireAuth=False)
+def logout():
+    token = request.cookies.get("grommunioAuthJwt")
+    if token:
+        valid, claims = checkToken(token)
+        revokeToken(token)
+        if valid:
+            audit.log("{} logged out from {}".format(audit.q(claims.get("usr")), audit.esc(request.remote_addr)))
+    return clearAuthCookie(jsonify(message="Logged out"))
 
 
 @API.route(api.BaseRoute+"/profile", methods=["GET"])

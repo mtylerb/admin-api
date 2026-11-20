@@ -8,6 +8,7 @@ import ldap3
 import ldap3.core.exceptions as ldapexc
 import ldap3.utils.config as ldap3_conf
 import re
+import ssl
 import threading
 import yaml
 
@@ -18,6 +19,56 @@ logger = logging.getLogger("ldap")
 # Reduce block time when LDAP server is not reachable
 ldap3_conf.set_config_parameter("RESTARTABLE_SLEEPTIME", 1)
 ldap3_conf.set_config_parameter("RESTARTABLE_TRIES", 2)
+
+
+LDAP_CONFS = ("/etc/openldap/ldap.conf", "/etc/ldap/ldap.conf")
+_warned = set()
+
+
+def _ldapConf():
+    """TLS_* directives of the libldap configuration, which gromox uses too."""
+    for path in LDAP_CONFS:
+        try:
+            with open(path, encoding="utf-8") as file:
+                conf = {}
+                for line in file:
+                    parts = line.split(None, 1)
+                    if len(parts) == 2 and parts[0].upper().startswith("TLS_"):
+                        conf[parts[0].upper()] = parts[1].strip()
+                return conf
+        except OSError:
+            pass
+    return {}
+
+
+def tlsSettings():
+    """Return (verify, CA file, CA directory) for LDAP connections.
+
+    `options.ldapTlsVerify` is "auto" (follow TLS_REQCERT like libldap, default "demand"),
+    "always" or "never". The CA is `options.ldapCACert`, else TLS_CACERT/TLS_CACERTDIR,
+    else the system store.
+    """
+    from tools.config import Config
+    opts = Config["options"]
+    conf = _ldapConf()
+    mode = opts.get("ldapTlsVerify", "auto")
+    if mode == "auto":
+        verify = conf.get("TLS_REQCERT", "demand").lower() not in ("never", "allow")
+    else:
+        verify = mode != "never"
+    if opts.get("ldapCACert"):
+        return verify, opts["ldapCACert"], None
+    return verify, conf.get("TLS_CACERT"), conf.get("TLS_CACERTDIR")
+
+
+def _tlsError(err):
+    """Find a certificate problem in the (nested) ldap3 exception."""
+    text = repr(err)
+    match = re.search(r"certificate verify failed: [^'\"(]*", text)
+    if match:
+        return match.group(0).strip(" .")
+    match = re.search(r"doesn't match any name in \[([^\]]*)\]", text)
+    return "certificate is not valid for "+match.group(1) if match else None
 
 
 def handleLdapError(service, error):
@@ -290,17 +341,34 @@ class LdapService:
         starttls : bool, optional
             Initiate STARTTLS connection.
 
+        Certificates are verified according to `tlsSettings()`. A failed STARTTLS is
+        an error, never a fallback to an unencrypted bind.
+
         Returns
         -------
         ldap3.Connection
             Connection object.
         """
-        servers = [ldap3.Server(s[:-1] if s.endswith("/") else s, get_info=ldap3.NONE) for s in server.split()]
+        verify, cafile, cadir = tlsSettings()
+        tls = ldap3.Tls(validate=ssl.CERT_REQUIRED if verify else ssl.CERT_NONE,
+                        ca_certs_file=cafile, ca_certs_path=cadir)
+        servers = [ldap3.Server(s[:-1] if s.endswith("/") else s, get_info=ldap3.NONE, tls=tls) for s in server.split()]
+        if not verify and server not in _warned and (starttls or any(s.ssl for s in servers)):
+            _warned.add(server)
+            logger.warning(f"Not verifying the TLS certificate of {server} (see options.ldapTlsVerify)")
         pool = servers[0] if len(servers) == 1 else ldap3.ServerPool(servers, "FIRST", active=1)
         conn = ldap3.Connection(pool, user=user, password=password, client_strategy=ldap3.RESTARTABLE)
-        conn.open()
-        if starttls and not conn.start_tls():
-            logger.warning(f"Failed to initiate StartTLS connection with {server}")
+        try:
+            conn.open()
+            if starttls and not conn.start_tls():
+                conn.unbind()
+                raise ldapexc.LDAPStartTLSError(f"Failed to initiate StartTLS connection with {server}")
+        except ldapexc.LDAPException as err:
+            reason = _tlsError(err)
+            if reason:
+                raise ldapexc.LDAPSocketOpenError(f"TLS certificate of {server} rejected ({reason}), "
+                                                  "see TLS_CACERT in ldap.conf or options.ldapCACert") from None
+            raise
         if not conn.bind():
             raise ldapexc.LDAPBindError(
                 "LDAP bind failed ({}): {}".format(conn.result["description"], conn.result["message"]))
