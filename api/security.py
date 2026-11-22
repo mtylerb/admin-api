@@ -9,7 +9,7 @@ import time
 import jwt
 
 from base64 import b64encode
-from services import Service
+from services import Service, ServiceUnavailableError
 from tools.config import Config
 
 
@@ -237,6 +237,11 @@ def loginUser(username, password):
     password : str
         Password to check
 
+    Raises
+    ------
+    services.ServiceUnavailableError
+        The LDAP service is not available
+
     Returns
     -------
     bool
@@ -250,10 +255,14 @@ def loginUser(username, password):
     if user is None:
         return False, "Invalid username or password"
     if user.externID is not None:
-        with Service("ldap", user.orgID) as ldap:
-            error = ldap.authUser(user.externID, password)
-            if error:
-                return False, error
+        try:
+            with Service("ldap", user.orgID) as ldap:
+                error = ldap.authUser(user.externID, password)
+                if error:
+                    return False, error
+        except ServiceUnavailableError as err:
+            logger.warning("Cannot authenticate '{}': {}".format(user.username, err.args[0]))
+            raise ServiceUnavailableError("Authentication service not available")
     elif not user.chkPw(password):
         return False, "Invalid username or password"
     if not userLoginAllowed(user):
@@ -263,6 +272,17 @@ def loginUser(username, password):
     except Exception:
         return False, "Token generation failed"
     return True, token
+
+
+def _validateAccount():
+    from .errors import AuthenticationError, AuthenticationError, AccountDeactivated
+    from orm.users import Users
+    error = getUser()
+    if error is not None:
+        raise AuthenticationError(error)
+    user = request.auth["user"]
+    if user.ID != 0 and user.addressStatus != 0:
+        raise AccountDeactivated("Account is shared mailbox" if user.addressStatus == Users.SHARED else "Account is deactivated")
 
 
 def checkPermissions(*requested):
@@ -277,24 +297,42 @@ def checkPermissions(*requested):
     ------
     InsufficientPermissions
         At least one permission check failed
+    AuthenticationError
+        Account could not be verified and/or authenticated
+    AccountDeactivated
+        Account is marked as deactivated or shared
 
     Returns
     -------
     None.
     """
     from .errors import InsufficientPermissions
-    error = getUser()
-    if error is not None:
-        raise InsufficientPermissions(error)
+    _validateAccount()
     user = request.auth["user"]
-    if user.ID != 0 and user.addressStatus != 0:
-        raise InsufficientPermissions("Account deactivated")
     permissions = user.permissions()
     if not all(permission in permissions for permission in requested):
         raise InsufficientPermissions()
 
 
-def checkTargetUser(user):
+
+def resetDomains():
+    """Check that the current user may reset passwords and get the permitted domains.
+
+    Returns
+    -------
+    set
+        IDs of the permitted domains, or None if not restricted
+    """
+    _validateAccount()
+    user = request.auth["user"]
+    domainIDs = user.permissions().resetPasswdDomains()
+    if domainIDs is not None and len(domainIDs) == 0:
+        from .errors import InsufficientPermissions
+        raise InsufficientPermissions()
+    return domainIDs
+
+
+def checkTargetUser(user, validateAccount=False):
     """Check if current user may change the login names or credentials of a user.
 
     Admins must not take over accounts that hold permissions they do not have themselves.
@@ -313,7 +351,13 @@ def checkTargetUser(user):
     -------
     None.
     """
-    from .errors import InsufficientPermissions
+    if validateAccount:
+        _validateAccount()
+    if user is None:
+        raise ValueError("Invalid target user")
+    from .errors import InsufficientPermissions, AuthenticationError
     current = request.auth["user"]
+    if current is None:
+        raise AuthenticationError()
     if user.ID != current.ID and not current.permissions().covers(user.permissions()):
         raise InsufficientPermissions("User holds permissions you do not have")
